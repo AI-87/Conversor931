@@ -4,134 +4,95 @@ import pdfplumber
 import re
 import io
 
-st.set_page_config(page_title="Extractor F.931 Definitivo", layout="wide")
-st.title("📑 Consolidador Multiempresa F.931")
+st.set_page_config(page_title="Extractor F.931 Contable", layout="wide")
+st.title("📑 Consolidador F.931 - Sección VIII")
 
 def limpiar_monto(texto):
-    """Convierte texto de moneda ($ 1.234,56) a float (1234.56)"""
+    """Convierte texto ($ 649.976,20) a float (649976.20)"""
     if not texto: return 0.0
     try:
-        # Eliminar todo lo que no sea número, coma o punto
+        # Dejar solo números, comas y puntos
         limpio = re.sub(r'[^\d,.-]', '', texto)
         if not limpio: return 0.0
         
-        # Lógica para detectar miles y decimales formato Argentina
+        # Lógica Argentina: si hay punto y coma, el punto vuela y la coma es decimal
         if ',' in limpio and '.' in limpio:
-            # Tiene ambos (ej: 1.234,56) -> eliminar punto, cambiar coma por punto
             limpio = limpio.replace('.', '').replace(',', '.')
         elif ',' in limpio:
-            # Solo tiene coma (ej: 1234,56) -> cambiar por punto
             limpio = limpio.replace(',', '.')
-        # Si solo tiene punto (ej: 1.234), asumimos que es miles si son 3 digitos, o error.
-        # Para 931 estándar, la coma es el decimal.
         
         return float(limpio)
     except:
         return 0.0
 
-def extraer_valor_linea(linea):
-    """Busca todos los montos en una línea y devuelve el mayor (evita los 0.00 de tasas)"""
-    # Busca patrones numéricos tipo 1.234,56 o 1234,56
-    coincidencias = re.findall(r'[\d.]+,\d{2}', linea)
-    montos = [limpiar_monto(m) for m in coincidencias]
-    
-    # Filtramos ceros y nos quedamos con el máximo valor encontrado en esa línea
-    montos_validos = [m for m in montos if m > 0]
-    
-    if montos_validos:
-        return max(montos_validos) # Devuelve el importe más grande (el total)
-    return 0.0
-
-def procesar_931(file):
+def procesar_931(file, index):
     with pdfplumber.open(file) as pdf:
-        # Extraemos texto página por página manteniendo la estructura física
-        full_text = ""
-        for page in pdf.pages:
-            full_text += page.extract_text() + "\n"
+        # Extraer todo el texto junto
+        txt = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
         
-        lines = full_text.split('\n')
         res = {}
         
-        # Inicializamos variables en 0
-        campos = [
-            'Rem 1', 'Rem 4', 'Rem 8', 'Rem 9', 'Rem 10', 
-            'Ley 27430 Detraido', 'Dec 394', 
-            '351-Contrib SS', '351-SIPA', '351-No SIPA', '301-Aportes SS',
-            '352-Contrib OS', '302-Aportes OS', '312-LRT', '028-Vida'
-        ]
-        for c in campos: res[c] = 0.0
+        # --- 1. IDENTIFICACIÓN (Razón Social y CUIT) ---
+        # Busca Razón social arriba de todo
+        rs = re.search(r"(?:Social|Razon Social):\s*\n?\s*(.*)", txt, re.IGNORECASE)
+        res['Empresa'] = rs.group(1).strip() if rs else "Empresa No Identificada"
+        
+        cuit = re.search(r"\b(20|23|27|30|33)-\d{8}-\d\b", txt)
+        res['CUIT'] = cuit.group(0) if cuit else "S/D"
+        
+        # --- 2. FECHA (Para evitar error de columnas duplicadas) ---
+        # Primero busca en el texto
+        per_match = re.search(r"(\d{2}/\d{4})", txt)
+        if per_match:
+            res['Mes - Año'] = per_match.group(1)
+        else:
+            # Si no encuentra en el texto, busca en el nombre del archivo (ej: 01-2025.pdf)
+            name_match = re.search(r"(\d{2}[-.]\d{4})", file.name)
+            if name_match:
+                res['Mes - Año'] = name_match.group(1).replace('-', '/').replace('.', '/')
+            else:
+                # Si falla todo, usa un nombre genérico para que NO se rompa la app
+                res['Mes - Año'] = f"Archivo {index+1}"
 
-        # --- EXTRACCIÓN LÍNEA POR LÍNEA (Más segura) ---
-        for line in lines:
-            line_upper = line.upper()
+        # --- 3. EXTRACCIÓN ESPECÍFICA (Basada en tu Imagen) ---
+        
+        # A. Remuneraciones (Busca Rem. X seguido de un monto)
+        for r in [1, 4, 8, 9, 10]:
+            # Regex busca "Rem. 1" ...espacio... numero
+            match = re.search(rf"Rem\. {r}.*?([\d.,]+)", txt)
+            res[f'Rem {r}'] = limpiar_monto(match.group(1)) if match else 0.0
 
-            # Identificación
-            if "RAZON SOCIAL" in line_upper or "APELLIDO Y NOMBRE" in line_upper:
-                res['Empresa'] = line.split(':')[-1].strip()
-            if "CUIT" in line_upper and "PERIOD" not in line_upper:
-                match = re.search(r'\d{2}-\d{8}-\d', line)
-                if match: res['CUIT'] = match.group(0)
-            if "PERIODO" in line_upper or "PERÍODO" in line_upper:
-                match = re.search(r'\d{2}/\d{4}', line)
-                if match: res['Mes - Año'] = match.group(0)
-            if "NOMINA" in line_upper or "EMPLEADOS" in line_upper:
-                match = re.search(r'\d+', line.split(':')[-1])
-                if match: res['Empleados'] = match.group(0)
+        # B. Ley 27430 (Monto Total Detraído)
+        # En tu imagen dice: "Ley 27.430 - Monto Total Detraido: 28.014,72"
+        detraido = re.search(r"Ley 27\.430.*?Detraido[:\s]+([\d.,]+)", txt, re.IGNORECASE)
+        res['Ley 27430 Detraido'] = limpiar_monto(detraido.group(1)) if detraido else 0.0
 
-            # Remuneraciones
-            for r in [1, 4, 8, 9, 10]:
-                if f"REM. {r}" in line_upper or f"REMUNERACION {r}" in line_upper or f"REM {r} " in line_upper:
-                     # Para remuneraciones, a veces el numero está pegado al texto, usamos regex específico
-                     val = extraer_valor_linea(line)
-                     if val > 0: res[f'Rem {r}'] = val
-
-            # Detracciones
-            if "DETRAIDO" in line_upper:
-                res['Ley 27430 Detraido'] = extraer_valor_linea(line)
-            if "DECRETO 394" in line_upper or "DEC 394" in line_upper or "DEC. 394" in line_upper:
-                res['Dec 394'] = extraer_valor_linea(line)
-
-            # Conceptos de Seguridad Social y Obra Social
-            # Usamos códigos específicos para evitar confusiones
-            
-            # 351 Total
-            if "351" in line and "CONTRIBUCIONES" in line_upper and "SEGURIDAD" in line_upper:
-                res['351-Contrib SS'] = extraer_valor_linea(line)
-            
-            # SIPA y No SIPA (A veces comparten linea o estan cerca, mejor buscar especifico)
-            elif "SIPA" in line_upper and "NO SIPA" not in line_upper and "CONTRIBUCIONES" in line_upper: # Solo SIPA
-                 # A veces dice "Regimen Nacional...", buscamos la linea que tenga plata
-                 val = extraer_valor_linea(line)
-                 if val > 0 and res['351-SIPA'] == 0: res['351-SIPA'] = val
-            
-            elif "NO SIPA" in line_upper:
-                 val = extraer_valor_linea(line)
-                 if val > 0: res['351-No SIPA'] = val
-
-            # 301 Aportes
-            if "301" in line and "APORTES" in line_upper:
-                res['301-Aportes SS'] = extraer_valor_linea(line)
-
-            # 352 OS
-            if "352" in line and "CONTRIBUCIONES" in line_upper:
-                res['352-Contrib OS'] = extraer_valor_linea(line)
-            
-            # 302 Aportes OS
-            if "302" in line and "APORTES" in line_upper:
-                res['302-Aportes OS'] = extraer_valor_linea(line)
-            
-            # LRT
-            if "312" in line or ("LRT" in line_upper and "LEY" in line_upper):
-                val = extraer_valor_linea(line)
-                if val > 0: res['312-LRT'] = val
-            
-            # Vida
-            if "028" in line or "VIDA OBLIGATORIO" in line_upper:
-                res['028-Vida'] = extraer_valor_linea(line)
-
-        # Valores por defecto si no encontró identificación
-        if 'Empresa' not in res: res['Empresa'] = "No Identificada"
-        if 'Mes - Año' not in res: res['Mes - Año'] = "S/D"
+        # C. SECCIÓN VIII - MONTOS QUE SE INGRESAN (Los códigos de tu imagen)
+        # Usamos re.DOTALL para que busque saltos de linea si es necesario
+        
+        # 351
+        m351 = re.search(r"351\s*-\s*Contribuciones.*?Seguridad Social\s+([\d.,]+)", txt, re.IGNORECASE)
+        res['351-Contrib SS'] = limpiar_monto(m351.group(1)) if m351 else 0.0
+        
+        # 301
+        m301 = re.search(r"301\s*-\s*Aportes.*?Seguridad Social\s+([\d.,]+)", txt, re.IGNORECASE)
+        res['301-Aportes SS'] = limpiar_monto(m301.group(1)) if m301 else 0.0
+        
+        # 352
+        m352 = re.search(r"352\s*-\s*Contribuciones.*?Obra Social\s+([\d.,]+)", txt, re.IGNORECASE)
+        res['352-Contrib OS'] = limpiar_monto(m352.group(1)) if m352 else 0.0
+        
+        # 302
+        m302 = re.search(r"302\s*-\s*Aportes.*?Obra Social\s+([\d.,]+)", txt, re.IGNORECASE)
+        res['302-Aportes OS'] = limpiar_monto(m302.group(1)) if m302 else 0.0
+        
+        # 312 (LRT)
+        m312 = re.search(r"312\s*-\s*L\.?R\.?T\.?\s+([\d.,]+)", txt, re.IGNORECASE)
+        res['312-LRT'] = limpiar_monto(m312.group(1)) if m312 else 0.0
+        
+        # 028 (Vida)
+        m028 = re.search(r"(?:028|SCVO)\s*-\s*Seguro.*?Vida.*?\s+([\d.,]+)", txt, re.IGNORECASE)
+        res['028-Vida'] = limpiar_monto(m028.group(1)) if m028 else 0.0
 
         return res
 
@@ -140,26 +101,38 @@ files = st.file_uploader("Cargá tus F.931 (PDF)", type="pdf", accept_multiple_f
 
 if files:
     try:
-        data = [procesar_931(f) for f in files]
+        data = []
+        # Pasamos el índice (i) para usarlo de respaldo si falta la fecha
+        for i, f in enumerate(files):
+            data.append(procesar_931(f, i))
+            
         df = pd.DataFrame(data)
         
         if not df.empty:
+            # Seleccionamos empresa
             empresas = df['Empresa'].unique()
-            emp_sel = st.selectbox("Seleccioná la empresa:", empresas)
+            emp_sel = st.selectbox("Empresa:", empresas)
             
-            # Filtrar y trasponer
-            df_final = df[df['Empresa'] == emp_sel].set_index('Mes - Año').T
+            # Filtramos
+            df_final = df[df['Empresa'] == emp_sel].copy()
             
-            st.write(f"### Planilla: {emp_sel}")
-            st.dataframe(df_final) # Sin formato forzado para evitar errores
+            # Validamos que no haya duplicados en la columna de fecha
+            if df_final['Mes - Año'].duplicated().any():
+                st.warning("⚠️ Hay archivos con la misma fecha. Se agregarán sufijos para no perder datos.")
+                # Truco para hacer únicos los nombres de columnas
+                df_final['Mes - Año'] = df_final['Mes - Año'] + df_final.groupby('Mes - Año').cumcount().astype(str).replace('0', '')
+            
+            # Pivotamos la tabla
+            df_pivot = df_final.set_index('Mes - Año').T
+            
+            st.success(f"✅ Datos extraídos de la Sección VIII para {emp_sel}")
+            st.dataframe(df_pivot)
             
             # Excel
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                df_final.to_excel(writer, sheet_name='F931')
-            
-            st.download_button("📥 Descargar Excel", buffer.getvalue(), f"931_{emp_sel}.xlsx")
+                df_pivot.to_excel(writer, sheet_name='F931_Datos')
+            st.download_button("📥 Descargar Excel", buffer.getvalue(), f"931_{emp_sel[:5]}.xlsx")
             
     except Exception as e:
         st.error(f"Error: {e}")
-
