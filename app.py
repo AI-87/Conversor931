@@ -8,7 +8,8 @@ st.set_page_config(page_title="Extractor F.931 Profesional", layout="wide")
 st.title("📑 Consolidador Multiempresa F.931")
 
 def limpiar_monto(texto):
-    if not texto: return 0.0
+    if not texto:
+        return 0.0
     try:
         # Extrae solo números, comas y puntos
         valor = re.sub(r'[^\d,.]', '', texto)
@@ -26,41 +27,45 @@ def procesar_931(file):
         txt = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
         res = {}
         
-        # Identificación Segura
-        rs = re.search(r"Social:\s*\n?\s*(.*)", txt)
+        # Identificación segura
+        rs = re.search(r"Raz[oó]n Social:\s*\n?\s*(.*)", txt)
         res['Empresa'] = rs.group(1).strip() if rs else "Empresa No Identificada"
         
         cuit = re.search(r"(\d{2}-\d{8}-\d)", txt)
         res['CUIT'] = cuit.group(1) if cuit else "S/D"
         
-        per = re.search(r"(\d{2}/\d{4})", txt)
-        res['Mes - Año'] = per.group(1) if per else "S/D"
+        # Mes y Año (ej: 11/2025 o 11 2025)
+        per = re.search(r"Mes\s*-\s*A[oó]\s*(\d{2})\s*/?\s*(\d{4})", txt, re.I)
+        if per:
+            res['Mes - Año'] = f"{per.group(1)}/{per.group(2)}"
+        else:
+            res['Mes - Año'] = "S/D"
         
-        emp = re.search(r"nomi\w*\s*[:\s]*(\d+)", txt, re.I)
+        emp = re.search(r"Empleados en n[oó]mina:\s*(\d+)", txt, re.I)
         res['Empleados'] = emp.group(1) if emp else "0"
 
         # Remuneraciones (1, 4, 8, 9, 10)
         for r in [1, 4, 8, 9, 10]:
-            m = re.search(f"Rem\. {r}[:\s]+([\d.,]+)", txt)
+            m = re.search(rf"Suma de Rem\. {r}:\s*([\d.,]+)", txt)
             res[f'Rem {r}'] = limpiar_monto(m.group(1)) if m else 0.0
 
-        # Detracciones y Decreto 394
-        det = re.search(r"Detraido[:\s]+([\d.,]+)", txt)
+        # Ley 27430 y Dec. 394
+        det = re.search(r"Ley\s*27\.?430.*?Detra[ií]do[:\s]+([\d.,]+)", txt, re.I)
         res['Ley 27430 Detraido'] = limpiar_monto(det.group(1)) if det else 0.0
-        dec = re.search(r"394[:\s]+([\d.,]+)", txt)
+        
+        dec = re.search(r"Pago a Cuenta\s*Dec\.?\s*394[:\s]+([\d.,]+)", txt, re.I)
         res['Dec 394'] = limpiar_monto(dec.group(1)) if dec else 0.0
 
-        # --- BÚSQUEDA AGRESIVA DE CONCEPTOS RESALTADOS ---
-        # Buscamos por el código numérico de AFIP que es infalible
+        # Conceptos AFIP (bloque VIII - MONTOS QUE SE INGRESAN)
         regex_conceptos = {
-            '351-Contrib SS Total': r"351-?Contribuciones de Seguridad Social\s+([\d.,]+)",
-            '351-SIPA': r"SIPA\s+([\d.,]+)",
-            '351-No SIPA': r"No SIPA\s+([\d.,]+)",
-            '301-Aportes SS': r"301-?Aportes de Seguridad Social\s+([\d.,]+)",
-            '352-Contrib OS': r"352-?Contrib.*?Obra Social\s+([\d.,]+)",
-            '302-Aportes OS': r"302-?Aportes de Obra Social\s+([\d.,]+)",
-            '312-LRT': r"312-?L\.?R\.?T\.?\s+([\d.,]+)",
-            '028-Vida': r"028-?Seguro Colectivo de Vida Obligatorio\s+([\d.,]+)"
+            '351-Contrib SS Total': r"351\s*-\s*Contribuciones de Seguridad Social\s+([\d.,]+)",
+            '351-SIPA': r"351\s+Contribuciones S\.?S\.?\s*SIPA\s+([\d.,]+)",
+            '351-No SIPA': r"351\s+Contribuciones S\.?S\.?\s*No\s+SIPA\s+([\d.,]+)",
+            '301-Aportes SS': r"301\s*-\s*Aportes de Seguridad Social\s+([\d.,]+)",
+            '352-Contrib OS': r"352\s+Contribuciones de Obra Social\s+([\d.,]+)",
+            '302-Aportes OS': r"302\s*-\s*Aportes de Obra Social\s+([\d.,]+)",
+            '312-LRT': r"312\s*-\s*L\.?R\.?T\.?\s+([\d.,]+)",
+            '028-Vida': r"028\s*-\s*Seguro Colectivo de Vida Obligatorio\s+([\d.,]+)",
         }
         
         for clave, patron in regex_conceptos.items():
@@ -75,18 +80,38 @@ files = st.file_uploader("Cargá tus F.931 (PDF)", type="pdf", accept_multiple_f
 if files:
     try:
         data = [procesar_931(f) for f in files]
+
+        # Asegurar que todas las claves existan
+        campos_clave = [
+            'Empresa','CUIT','Mes - Año','Empleados',
+            'Rem 1','Rem 4','Rem 8','Rem 9','Rem 10',
+            'Ley 27430 Detraido','Dec 394',
+            '351-Contrib SS Total','351-SIPA','351-No SIPA',
+            '301-Aportes SS','352-Contrib OS','302-Aportes OS',
+            '312-LRT','028-Vida'
+        ]
+        for d in data:
+            for c in campos_clave:
+                d.setdefault(c, 0.0 if c not in ['Empresa','CUIT','Mes - Año'] else "")
+
         df = pd.DataFrame(data)
-        
+
         if not df.empty:
-            empresas = df['Empresa'].unique()
+            # descartar filas sin período válido
+            df = df[df['Mes - Año'] != "S/D"]
+
+            empresas = df['Empresa'].replace("", "Empresa No Identificada").unique()
             emp_sel = st.selectbox("Seleccioná la empresa:", empresas)
-            
-            # Filtrar y trasponer
-            df_final = df[df['Empresa'] == emp_sel].set_index('Mes - Año').T
+
+            df_filtrado = df[df['Empresa'].replace("", "Empresa No Identificada") == emp_sel]
+
+            # asegurar que Mes - Año no se repita
+            df_filtrado = df_filtrado.drop_duplicates(subset=['Mes - Año'])
+
+            df_final = df_filtrado.set_index('Mes - Año').T
             
             st.write(f"### Planilla Consolidada: {emp_sel}")
-            # Se muestra la tabla limpia para evitar errores 'f'
-            st.dataframe(df_final)
+            st.dataframe(df_final, use_container_width=True)
             
             # Generación de Excel
             buffer = io.BytesIO()
@@ -100,3 +125,4 @@ if files:
             )
     except Exception as e:
         st.error(f"Error detectado: {e}")
+
