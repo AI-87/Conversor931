@@ -92,4 +92,3 @@ if files:
             
     except Exception as e:
         st.error(f"Error detectado: {e}")
- 
