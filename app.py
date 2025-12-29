@@ -4,7 +4,7 @@ import pdfplumber
 import re
 import io
 
-st.set_page_config(page_title="Extractor Universal F.931", layout="wide")
+st.set_page_config(page_title="Extractor F.931 Profesional", layout="wide")
 st.title("📑 Consolidador Multiempresa F.931")
 
 def limpiar_monto(texto):
@@ -12,14 +12,23 @@ def limpiar_monto(texto):
     valor = re.sub(r'[^\d,]', '', texto)
     return float(valor.replace(',', '.')) if valor else 0.0
 
+def extraer_con_codigo(texto, codigo, fallback_regex):
+    # Primero intenta buscar por el código numérico oficial de AFIP
+    match = re.search(rf"{codigo}.*?([\d.,]+)", texto)
+    if match:
+        return limpiar_monto(match.group(1))
+    # Si falla, intenta con una descripción general
+    match_alt = re.search(fallback_regex, texto, re.IGNORECASE)
+    return limpiar_monto(match_alt.group(1)) if match_alt else 0.0
+
 def procesar_931(file):
     with pdfplumber.open(file) as pdf:
         txt = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
         res = {}
         
-        # Identificación básica
-        rs = re.search(r"(?:Social|Razon Social):\s*\n?\s*(.*)", txt, re.IGNORECASE)
-        res['Empresa'] = rs.group(1).strip() if rs else "No identificado"
+        # Datos Identificatorios (Red de seguridad para que no falle)
+        rs = re.search(r"Social:\s*\n?\s*(.*)", txt)
+        res['Empresa'] = rs.group(1).strip() if rs else "Sin Nombre"
         
         cuit = re.search(r"(\d{2}-\d{8}-\d)", txt)
         res['CUIT'] = cuit.group(1) if cuit else "S/D"
@@ -27,62 +36,54 @@ def procesar_931(file):
         periodo = re.search(r"(\d{2}/\d{4})", txt)
         res['Mes - Año'] = periodo.group(1) if periodo else "S/D"
         
-        emp = re.search(r"(?:nómina|nomina)\s*[:\s]*(\d+)", txt, re.IGNORECASE)
-        res['Empleados'] = emp.group(1) if emp else "0"
+        emp = re.search(r"nomi\w*\s*[:\s]*(\d+)", txt, re.I)
+        res['Empleados'] = int(emp.group(1)) if emp else 0
 
         # Remuneraciones
         for r in [1, 4, 8, 9, 10]:
             m = re.search(f"Rem\. {r}[:\s]+([\d.,]+)", txt)
             res[f'Rem {r}'] = limpiar_monto(m.group(1)) if m else 0.0
 
-        # Monto Detraído y Decreto 394
-        det = re.search(r"Detraido[:\s]+([\d.,]+)", txt)
-        res['Ley 27430 Detraido'] = limpiar_monto(det.group(1)) if det else 0.0
-        
-        dec = re.search(r"Dec\.?\s*394[:\s]+([\d.,]+)", txt)
-        res['Dec 394'] = limpiar_monto(dec.group(1)) if dec else 0.0
+        # Detracciones (Resaltados en tu planilla)
+        res['Ley 27430 Detraido'] = extraer_con_codigo(txt, "Detraido", r"Detraido[:\s]+([\d.,]+)")
+        res['Dec 394'] = extraer_con_codigo(txt, "394", r"394[:\s]+([\d.,]+)")
 
-        # CONCEPTOS RESALTADOS (Búsqueda robusta)
-        # 1. Seguridad Social
-        ss_total = re.search(r"351-Contribuciones de Seguridad Social\s+([\d.,]+)", txt)
-        res['351-Contrib SS Total'] = limpiar_monto(ss_total.group(1)) if ss_total else 0.0
+        # CONCEPTOS DE SEGURIDAD Y OBRA SOCIAL (Uso de códigos 351, 301, 352, 302, 312)
+        res['351-Contrib SS Total'] = extraer_con_codigo(txt, "351-Contribuciones de Seguridad Social", r"Social\s+([\d.,]+)\s+a1")
+        res['351-SIPA'] = extraer_con_codigo(txt, "SIPA", r"SIPA\s+([\d.,]+)")
+        res['351-No SIPA'] = extraer_con_codigo(txt, "No SIPA", r"No SIPA\s+([\d.,]+)")
+        res['301-Aportes SS'] = extraer_con_codigo(txt, "301", r"301-?Aportes.*?Seguridad Social\s+([\d.,]+)")
         
-        sipa = re.search(r"S\.S\. SIPA\s+([\d.,]+)", txt)
-        res['351-SIPA'] = limpiar_monto(sipa.group(1)) if sipa else 0.0
+        res['352-Contrib OS'] = extraer_con_codigo(txt, "352", r"352-?Contrib.*?Obra Social\s+([\d.,]+)")
+        res['302-Aportes OS'] = extraer_con_codigo(txt, "302", r"302-?Aportes.*?Obra Social\s+([\d.,]+)")
         
-        no_sipa = re.search(r"S\.S\. No SIPA\s+([\d.,]+)", txt)
-        res['351-No SIPA'] = limpiar_monto(no_sipa.group(1)) if no_sipa else 0.0
-        
-        aportes_ss = re.search(r"301-Aportes de Seguridad Social\s+([\d.,]+)", txt)
-        res['301-Aportes SS'] = limpiar_monto(aportes_ss.group(1)) if aportes_ss else 0.0
-
-        # 2. Obra Social
-        contrib_os = re.search(r"352-\s*Contribuciones de Obra Social\s+([\d.,]+)", txt)
-        res['352-Contrib OS'] = limpiar_monto(contrib_os.group(1)) if contrib_os else 0.0
-        
-        aportes_os = re.search(r"302-Aportes de Obra Social\s+([\d.,]+)", txt)
-        res['302-Aportes OS'] = limpiar_monto(aportes_os.group(1)) if aportes_os else 0.0
-
-        # 3. Otros
-        lrt = re.search(r"312-L\.?R\.?T\.?\s+([\d.,]+)", txt)
-        res['312-LRT'] = limpiar_monto(lrt.group(1)) if lrt else 0.0
-        
-        vida = re.search(r"028-Seguro Colectivo de Vida Obligatorio\s+([\d.,]+)", txt)
-        res['028-Vida'] = limpiar_monto(vida.group(1)) if vida else 0.0
+        res['312-LRT'] = extraer_con_codigo(txt, "312", r"312-?L\.?R\.?T\.?\s+([\d.,]+)")
+        res['028-Vida'] = extraer_con_codigo(txt, "028", r"028-?Seguro.*?Vida\s+([\d.,]+)")
             
         return res
 
-files = st.file_uploader("Subí tus archivos PDF", type="pdf", accept_multiple_files=True)
+# --- Interfaz de Usuario ---
+files = st.file_uploader("Cargá tus F.931 (PDF)", type="pdf", accept_multiple_files=True)
+
 if files:
-    data = [procesar_931(f) for f in files]
-    df = pd.DataFrame(data)
-    
-    empresas = df['Empresa'].unique()
-    sel = st.selectbox("Seleccioná Empresa:", empresas)
-    df_f = df[df['Empresa'] == sel].set_index('Mes - Año').T
-    
-    st.dataframe(df_f.style.format("{:,.2f}"))
-    
-    towrite = io.BytesIO()
-    df_f.to_excel(towrite, index=True)
-    st.download_button("📥 Descargar Excel", towrite.getvalue(), f"Planilla_{sel}.xlsx")
+    try:
+        data = [procesar_931(f) for f in files]
+        df = pd.DataFrame(data)
+        
+        # Selección de Empresa (para no mezclar cuits diferentes)
+        empresas_disponibles = df['Empresa'].unique()
+        empresa_elegida = st.selectbox("Seleccioná la empresa para ver la planilla:", empresas_disponibles)
+        
+        # Filtrar y trasponer para que los meses queden arriba (columnas)
+        df_final = df[df['Empresa'] == empresa_elegida].set_index('Mes - Año').sort_index().T
+        
+        st.write(f"### Planilla Consolidada: {empresa_elegida}")
+        st.dataframe(df_final.style.format("{:,.2f}"))
+        
+        # Descarga
+        buffer = io.BytesIO()
+        df_final.to_excel(buffer)
+        st.download_button("📥 Descargar Planilla Excel", buffer.getvalue(), f"Planilla_{empresa_elegida}.xlsx")
+        
+    except Exception as e:
+        st.error(f"Error crítico de procesamiento: {e}")
