@@ -12,7 +12,8 @@ def limpiar_monto(texto):
     try:
         # Extrae solo números y comas/puntos finales
         valor = re.sub(r'[^\d,]', '', texto)
-        return float(valor.replace(',', '.')) if valor else 0.0
+        if not valor: return 0.0
+        return float(valor.replace(',', '.'))
     except:
         return 0.0
 
@@ -21,7 +22,7 @@ def procesar_931(file):
         txt = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
         res = {}
         
-        # Identificación (Uso de 'get' para evitar errores NoneType)
+        # Identificación (Uso de 'get' para evitar errores)
         rs = re.search(r"Social:\s*\n?\s*(.*)", txt)
         res['Empresa'] = rs.group(1).strip() if rs else "Empresa Desconocida"
         
@@ -46,16 +47,17 @@ def procesar_931(file):
         dec = re.search(r"394[:\s]+([\d.,]+)", txt)
         res['Dec 394'] = limpiar_monto(dec.group(1)) if dec else 0.0
 
-        # CONCEPTOS RESALTADOS (Búsqueda por palabra clave)
+        # --- EXTRACCIÓN ROBUSTA DE CONCEPTOS RESALTADOS ---
+        # Buscamos por código numérico y proximidad de texto
         conceptos = {
             '351-Contrib SS Total': r"351-?Contribuciones de Seguridad Social\s+([\d.,]+)",
-            '351-SIPA': r"SIPA\s+([\d.,]+)",
-            '351-No SIPA': r"No SIPA\s+([\d.,]+)",
-            '301-Aportes SS': r"301-?Aportes.*?Seguridad Social\s+([\d.,]+)",
-            '352-Contrib OS': r"352-?Contrib.*?Obra Social\s+([\d.,]+)",
-            '302-Aportes OS': r"302-?Aportes.*?Obra Social\s+([\d.,]+)",
+            '351-SIPA': r"S\.?S\.? SIPA\s+([\d.,]+)",
+            '351-No SIPA': r"S\.?S\.? No SIPA\s+([\d.,]+)",
+            '301-Aportes SS': r"301-?Aportes de Seguridad Social\s+([\d.,]+)",
+            '352-Contrib OS': r"352-?\s*Contribuciones de Obra Social\s+([\d.,]+)",
+            '302-Aportes OS': r"302-?Aportes de Obra Social\s+([\d.,]+)",
             '312-LRT': r"312-?L\.?R\.?T\.?\s+([\d.,]+)",
-            '028-Vida': r"028-?Seguro.*?Vida\s+([\d.,]+)"
+            '028-Vida': r"028-?Seguro Colectivo de Vida Obligatorio\s+([\d.,]+)"
         }
         
         for clave, regex in conceptos.items():
@@ -74,19 +76,20 @@ if files:
         
         if not df.empty:
             empresas = df['Empresa'].unique()
-            emp_sel = st.selectbox("Seleccioná la empresa:", empresas)
+            emp_sel = st.selectbox("Seleccioná la empresa para ver la planilla:", empresas)
             
-            # Filtrar y trasponer
+            # Filtrar y trasponer para que los meses queden arriba
             df_final = df[df['Empresa'] == emp_sel].set_index('Mes - Año').T
             
-            st.write(f"### Planilla: {emp_sel}")
-            # Mostramos la tabla normal para evitar errores de formato 'f'
-            st.dataframe(df_final)
+            st.write(f"### Planilla Consolidada: {emp_sel}")
+            # Mostramos la tabla formateada para que los números se vean bien
+            st.dataframe(df_final.style.format("{:,.2f}"))
             
-            # Botón de Descarga
+            # Botón de Descarga Excel
             buffer = io.BytesIO()
             df_final.to_excel(buffer)
-            st.download_button("📥 Descargar Excel", buffer.getvalue(), "Planilla_931.xlsx")
+            st.download_button("📥 Descargar Excel", buffer.getvalue(), f"Planilla_931_{emp_sel}.xlsx")
             
     except Exception as e:
         st.error(f"Error detectado: {e}")
+ 
