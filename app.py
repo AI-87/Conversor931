@@ -10,10 +10,14 @@ st.title("📑 Consolidador Multiempresa F.931")
 def limpiar_monto(texto):
     if not texto: return 0.0
     try:
-        # Extrae solo números y comas/puntos finales
-        valor = re.sub(r'[^\d,]', '', texto)
-        if not valor: return 0.0
-        return float(valor.replace(',', '.'))
+        # Extrae solo números, comas y puntos
+        valor = re.sub(r'[^\d,.]', '', texto)
+        # Normaliza formato contable argentino
+        if ',' in valor and '.' in valor:
+            valor = valor.replace('.', '').replace(',', '.')
+        elif ',' in valor:
+            valor = valor.replace(',', '.')
+        return float(valor) if valor else 0.0
     except:
         return 0.0
 
@@ -22,9 +26,9 @@ def procesar_931(file):
         txt = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
         res = {}
         
-        # Identificación (Uso de 'get' para evitar errores)
+        # Identificación Segura
         rs = re.search(r"Social:\s*\n?\s*(.*)", txt)
-        res['Empresa'] = rs.group(1).strip() if rs else "Empresa Desconocida"
+        res['Empresa'] = rs.group(1).strip() if rs else "Empresa No Identificada"
         
         cuit = re.search(r"(\d{2}-\d{8}-\d)", txt)
         res['CUIT'] = cuit.group(1) if cuit else "S/D"
@@ -40,28 +44,27 @@ def procesar_931(file):
             m = re.search(f"Rem\. {r}[:\s]+([\d.,]+)", txt)
             res[f'Rem {r}'] = limpiar_monto(m.group(1)) if m else 0.0
 
-        # Detracciones y Leyes
+        # Detracciones y Decreto 394
         det = re.search(r"Detraido[:\s]+([\d.,]+)", txt)
         res['Ley 27430 Detraido'] = limpiar_monto(det.group(1)) if det else 0.0
-        
         dec = re.search(r"394[:\s]+([\d.,]+)", txt)
         res['Dec 394'] = limpiar_monto(dec.group(1)) if dec else 0.0
 
-        # --- EXTRACCIÓN ROBUSTA DE CONCEPTOS RESALTADOS ---
-        # Buscamos por código numérico y proximidad de texto
-        conceptos = {
+        # --- BÚSQUEDA AGRESIVA DE CONCEPTOS RESALTADOS ---
+        # Buscamos por el código numérico de AFIP que es infalible
+        regex_conceptos = {
             '351-Contrib SS Total': r"351-?Contribuciones de Seguridad Social\s+([\d.,]+)",
-            '351-SIPA': r"S\.?S\.? SIPA\s+([\d.,]+)",
-            '351-No SIPA': r"S\.?S\.? No SIPA\s+([\d.,]+)",
+            '351-SIPA': r"SIPA\s+([\d.,]+)",
+            '351-No SIPA': r"No SIPA\s+([\d.,]+)",
             '301-Aportes SS': r"301-?Aportes de Seguridad Social\s+([\d.,]+)",
-            '352-Contrib OS': r"352-?\s*Contribuciones de Obra Social\s+([\d.,]+)",
+            '352-Contrib OS': r"352-?Contrib.*?Obra Social\s+([\d.,]+)",
             '302-Aportes OS': r"302-?Aportes de Obra Social\s+([\d.,]+)",
             '312-LRT': r"312-?L\.?R\.?T\.?\s+([\d.,]+)",
             '028-Vida': r"028-?Seguro Colectivo de Vida Obligatorio\s+([\d.,]+)"
         }
         
-        for clave, regex in conceptos.items():
-            match = re.search(regex, txt, re.IGNORECASE)
+        for clave, patron in regex_conceptos.items():
+            match = re.search(patron, txt, re.IGNORECASE)
             res[clave] = limpiar_monto(match.group(1)) if match else 0.0
             
         return res
@@ -76,19 +79,24 @@ if files:
         
         if not df.empty:
             empresas = df['Empresa'].unique()
-            emp_sel = st.selectbox("Seleccioná la empresa para ver la planilla:", empresas)
+            emp_sel = st.selectbox("Seleccioná la empresa:", empresas)
             
-            # Filtrar y trasponer para que los meses queden arriba
+            # Filtrar y trasponer
             df_final = df[df['Empresa'] == emp_sel].set_index('Mes - Año').T
             
             st.write(f"### Planilla Consolidada: {emp_sel}")
-            # Mostramos la tabla formateada para que los números se vean bien
-            st.dataframe(df_final.style.format("{:,.2f}"))
+            # Se muestra la tabla limpia para evitar errores 'f'
+            st.dataframe(df_final)
             
-            # Botón de Descarga Excel
+            # Generación de Excel
             buffer = io.BytesIO()
-            df_final.to_excel(buffer)
-            st.download_button("📥 Descargar Excel", buffer.getvalue(), f"Planilla_931_{emp_sel}.xlsx")
+            df_final.to_excel(buffer, sheet_name='Consolidado_931')
             
+            st.download_button(
+                label="📥 Descargar Excel",
+                data=buffer.getvalue(),
+                file_name=f"931_{emp_sel.replace(' ', '_')}.xlsx",
+                mime="application/vnd.ms-excel"
+            )
     except Exception as e:
         st.error(f"Error detectado: {e}")
